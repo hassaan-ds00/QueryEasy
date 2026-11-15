@@ -15,6 +15,7 @@ Working directly with MySQL databases creates two major bottlenecks for business
 <img width="1353" height="634" alt="Screenshot 2026-11-14 210247" src="https://github.com/user-attachments/assets/92cae661-40d2-4f53-9db1-9f48092782b0" />
 <img width="536" height="626" alt="Screenshot 2026-11-14 210302" src="https://github.com/user-attachments/assets/4570e85e-56db-43a5-9468-58b6039448ae" />
 <img width="1361" height="641" alt="Screenshot 2026-11-14 210340" src="https://github.com/user-attachments/assets/87e591f2-cb01-47b4-b4cf-7c16fad92c36" />
+<img width="817" height="469" alt="Screenshot 2026-11-14 210402" src="https://github.com/user-attachments/assets/2799dd06-9c8c-4237-9f2d-6184d6872471" />
 
 
 ## Key Features & Security Architecture
