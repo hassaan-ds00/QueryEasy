@@ -1,0 +1,7 @@
+.env
+*.db
+*.enc
+*.key
+*.jsonl
+__pycache__/
+.idea/

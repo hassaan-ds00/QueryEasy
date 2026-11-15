@@ -1,0 +1,8 @@
+streamlit
+mysql-connector-python
+openai
+sqlglot
+python-dotenv
+pandas
+cryptography
+Pillow
