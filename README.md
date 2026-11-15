@@ -40,6 +40,10 @@ Permissions are enforced at both the application level and the MySQL server leve
 * **Account Hardening & Audit Log:** Passwords are stored as salted `scrypt` hashes with brute-force lockouts and automatic session invalidation on password changes. All actions are logged to `audit_log.jsonl` without ever recording result rows.
 
 ---
+[![Chat on WhatsApp](https://shields.io)](https://wa.me/923173563210)
+
+
+
 
 ## Quick Start
 
