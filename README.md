@@ -1,7 +1,7 @@
 # QueryEasy 🔎
 **Ask your data. Stay private.**
 
-QueryEasy is a secure, web-based control panel that lets teams interact with **MySQL 8 databases using plain English**. Instead of writing complex SQL syntax, users simply type what they need—and QueryEasy translates, verifies, previews, and executes the request safely.
+QueryEasy is a secure, web-based control panel that lets teams interact with **MySQL databases using plain English**. Instead of writing complex SQL syntax, users simply type what they need—and QueryEasy translates, verifies, previews, and executes the request safely.
 
 ---
 
