@@ -1,7 +1,20 @@
+# Secrets (never upload)
 .env
-*.db
-*.enc
 *.key
+*.enc
+
+# App data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
 *.jsonl
+
+# Python
 __pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
 .idea/
