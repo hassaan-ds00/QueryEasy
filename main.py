@@ -1,5 +1,5 @@
 """
-QueryEasy v2 (single file): plain English -> MySQL, all statement types, with safety.
+QueryEasy (v2.01): plain English -> MySQL, all statement types, with safety.
 
 Install: pip install streamlit mysql-connector-python openai sqlglot python-dotenv pandas cryptography
 Setup files:  python queryeasy_full.py setup   (writes setup_mysql.sql and .env.example)
@@ -7,7 +7,10 @@ Run:  streamlit run queryeasy_full.py
 
 SAFETY MODEL
 - Roles: reader (SELECT/SHOW/DESCRIBE/EXPLAIN/USE), writer (+INSERT/UPDATE/DELETE),
-  admin (+CREATE/ALTER/DROP/TRUNCATE/RENAME). First registered user is admin.
+  admin (+CREATE/ALTER/DROP/TRUNCATE/RENAME).
+- FIRST ADMIN: the owner puts a secret QE_SETUP_TOKEN in the private .env file. Only someone who
+  enters that token at registration can become the first admin. The token stops working as soon as
+  an admin exists. Every later registration is a reader; admins promote users in Manage users.
 - Each statement runs with the MINIMUM MySQL account it needs (read / write / admin).
 - Data changes (INSERT/UPDATE/DELETE) run inside a transaction: preview, then Commit or Rollback.
 - Structure changes (DROP/TRUNCATE/ALTER/RENAME) need typing CONFIRM.
@@ -105,6 +108,9 @@ MAX_QUESTION_CHARS = 800
 AUDIT_FILE = os.getenv("QE_AUDIT_FILE", "audit_log.jsonl")
 USERS_DB = os.getenv("QE_USERS_DB", "users.db")
 ADMIN_USERS = {u.strip().lower() for u in os.getenv("QE_ADMIN_USERS", "").split(",") if u.strip()}
+# SETUP_TOKEN ...... secret from .env that lets the OWNER create the first admin (never shown in the app)
+SETUP_TOKEN = os.getenv("QE_SETUP_TOKEN", "").strip()
+MIN_SETUP_TOKEN = 16
 MAX_QUERIES_PER_SESSION = 40
 # AI key storage: the key an admin pastes in the app is saved ENCRYPTED in KEY_FILE.
 # MASTER_FILE holds the secret used for that encryption (or set QE_MASTER_KEY in .env instead).
@@ -847,6 +853,8 @@ def _udb():
         "username TEXT PRIMARY KEY COLLATE NOCASE, salt TEXT NOT NULL, pw_hash TEXT NOT NULL,"
         "fails INTEGER NOT NULL DEFAULT 0, locked_until REAL NOT NULL DEFAULT 0,"
         "role TEXT NOT NULL DEFAULT 'reader', pw_changed REAL NOT NULL DEFAULT 0, created REAL NOT NULL)")
+    # Small key/value table: remembers that first-admin setup is finished + token guess counters.
+    c.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     try:
         c.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'reader'")
     except sqlite3.OperationalError:
@@ -875,8 +883,62 @@ def password_problem(password: str) -> str | None:
     return None
 
 
-# Create an account. The very first account becomes admin; everyone else starts as reader.
-def register(username: str, password: str, confirm: str) -> tuple[bool, str]:
+# ---- First-admin setup helpers ----
+def _meta_get(c, key: str, default: str = "") -> str:
+    row = c.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else default
+
+
+def _meta_set(c, key: str, value: str) -> None:
+    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+
+
+# Setup is CLOSED forever once the first admin exists (flag in the database, or any admin row,
+# which also covers databases created before this feature existed).
+def _setup_closed(c) -> bool:
+    if _meta_get(c, "setup_done"):
+        return True
+    return c.execute("SELECT 1 FROM users WHERE role = 'admin' LIMIT 1").fetchone() is not None
+
+
+# True while the first admin has not been created yet (the only time the setup token works).
+def setup_open() -> bool:
+    with _udb() as c:
+        return not _setup_closed(c)
+
+
+# True if the owner put a long enough QE_SETUP_TOKEN in .env.
+def setup_token_configured() -> bool:
+    return len(SETUP_TOKEN) >= MIN_SETUP_TOKEN
+
+
+# Check the token the owner typed. Returns an error message, or None if the token is valid.
+#   - compared in constant time (no timing tricks)
+#   - repeated wrong guesses lock token entry for a while (stops brute force)
+def _check_setup_token(c, token: str) -> str | None:
+    if not setup_token_configured():
+        return (f"Setup is not ready. The owner must set QE_SETUP_TOKEN "
+                f"({MIN_SETUP_TOKEN}+ characters) in the .env file and restart the app.")
+    now = time.time()
+    locked_until = float(_meta_get(c, "setup_locked_until", "0"))
+    if locked_until > now:
+        return f"Too many wrong tokens. Try again in {int((locked_until - now) // 60) + 1} min."
+    if hmac.compare_digest(token.strip().encode("utf-8"), SETUP_TOKEN.encode("utf-8")):
+        _meta_set(c, "setup_fails", "0")
+        return None
+    fails = int(_meta_get(c, "setup_fails", "0")) + 1
+    if fails >= MAX_FAILS:
+        _meta_set(c, "setup_locked_until", str(now + LOCK_SECONDS))
+        fails = 0
+    _meta_set(c, "setup_fails", str(fails))
+    return "Invalid setup token."
+
+
+# Create an account.
+#   - No admin yet: ONLY the owner (valid setup token) can register, and becomes the first admin.
+#     The token is then disabled for good.
+#   - Admin exists: everyone becomes a reader (the token field is ignored). Admins promote people.
+def register(username: str, password: str, confirm: str, setup_token: str = "") -> tuple[bool, str]:
     username = username.strip()
     if not USERNAME_RE.match(username):
         return False, "Username: 3-20 letters, numbers or underscore."
@@ -886,16 +948,24 @@ def register(username: str, password: str, confirm: str) -> tuple[bool, str]:
     if password != confirm:
         return False, "Passwords do not match."
     salt = secrets.token_bytes(16)
+    pw_hash = _hash(password, salt).hex()  # slow on purpose, so done BEFORE locking the database
     try:
         with _udb() as c:
-            first = c.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0
+            c.execute("BEGIN IMMEDIATE")  # lock: two people cannot both become the first admin
+            first = not _setup_closed(c)
+            if first:
+                error = _check_setup_token(c, setup_token)
+                if error:
+                    return False, error  # the with-block still saves the wrong-guess counter
             c.execute("INSERT INTO users (username, salt, pw_hash, role, created) VALUES (?,?,?,?,?)",
-                      (username, salt.hex(), _hash(password, salt).hex(),
-                       "admin" if first else "reader", time.time()))
+                      (username, salt.hex(), pw_hash, "admin" if first else "reader", time.time()))
+            if first:
+                _meta_set(c, "setup_done", "1")  # the setup token is now disabled
     except sqlite3.IntegrityError:
         return False, "That username is taken."
-    return True, ("Account created. You are the first user, so you are the admin."
-                  if first else "Account created. You can log in now.")
+    if first:
+        return True, "Account created. You are the owner, so you are the Admin. The setup token is now disabled."
+    return True, "Account created as a Reader. An admin can give you more access."
 
 
 # Check username + password.
@@ -1295,9 +1365,14 @@ def render_auth() -> str | None:
             rp = st.text_input("Password (8+ chars, letters + numbers)",
                                type="password", key="reg_p", max_chars=128)
             rc = st.text_input("Confirm password", type="password", key="reg_c", max_chars=128)
+            rt = ""
+            if setup_open():  # only while no admin exists; hidden for everyone afterwards
+                st.caption("No admin exists yet. Only the application owner can create the first account.")
+                rt = st.text_input("Owner setup token (from the .env file)", type="password",
+                                   key="reg_t", max_chars=200)
             reg = st.form_submit_button("Create account")
         if reg:
-            ok, text = register(ru, rp, rc)
+            ok, text = register(ru, rp, rc, rt)
             _msg(text, good=ok)
             if ok:
                 st.balloons()
@@ -1357,6 +1432,12 @@ DB_RW_PASSWORD=CHANGE_ME_2
 # Admin account (CREATE/ALTER/DROP...). Leave empty to disable structure changes.
 DB_ADMIN_USER=queryeasy_admin
 DB_ADMIN_PASSWORD=CHANGE_ME_3
+
+# FIRST ADMIN (required once). Make up a long random secret and keep it private.
+# Generate one:  python -c "import secrets; print(secrets.token_urlsafe(32))"
+# Enter it on the Register tab when you create the FIRST account. It stops working once an admin
+# exists. Never share it; you may delete this line afterwards.
+QE_SETUP_TOKEN=paste_a_long_random_secret_here
 
 # Optional
 # QE_ADMIN_USERS=hassaan_1,other_name   (always admin in the app)
